@@ -207,7 +207,7 @@ def train(args, snapshot_path):
             )
             img_lb_w, target_lb = weak_batch[num_ulb:], label_batch[num_ulb:]
             img_ulb_w, img_ulb_s = weak_batch[:num_ulb], strong_batch[:num_ulb]
-            # ss aug
+            # cutmix aug
             mode = "pan" if flag_pancreas else "la"
             if random.random() < 0.5:  # for img_lb_w
                 img_lb_w, target_lb = cut_mix(img_lb_w, target_lb, mode=mode)
