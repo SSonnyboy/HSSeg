@@ -47,5 +47,4 @@ Following [SSL4MIS](https://github.com/HiLab-git/SSL4MIS) to prepare the three d
 
 ## Acknowledgement
 
-We thank [UA-MT](https://github.com/yulequan/UA-MT), [SSL4MIS](https://github.com/HiLab-git/SSL4MIS), [AD-MT](https://github.com/ZhenZHAO/AD-MT) and [SS-Net](https://github.com/ycwu1997/SS-Net), for part of their codes, processed datasets, and data partitions.
-
+We thank [UA-MT](https://github.com/yulequan/UA-MT), [SSL4MIS](https://github.com/HiLab-git/SSL4MIS), [AD-MT](https://github.com/ZhenZHAO/AD-MT), [SS-Net](https://github.com/ycwu1997/SS-Net) and [BCP](https://github.com/DeepMed-Lab-ECNU/BCP), for part of their codes, processed datasets, and data partitions.
