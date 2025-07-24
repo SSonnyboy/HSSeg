@@ -5,7 +5,7 @@
  'consistency_rampup': 50,
  'deterministic': False,
  'ema_decay': 0.99,
- 'exp': 'ACDC_base/vstru2',
+ 'exp': 'ACDC_base/vstru',
  'flag_pseudo_from_student': False,
  'gpu_id': 3,
  'labeled_bs': 12,

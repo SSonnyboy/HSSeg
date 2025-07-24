@@ -5,7 +5,7 @@
  'consistency_rampup': 40,
  'deterministic': 1,
  'ema_decay': 0.99,
- 'exp': 'Pancrease_base/vbase2',
+ 'exp': 'Pancrease_base/vbase',
  'gpu_id': 5,
  'labeled_bs': 2,
  'labeled_num': 12,
