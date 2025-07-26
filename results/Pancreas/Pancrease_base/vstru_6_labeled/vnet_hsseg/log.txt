@@ -21,7 +21,7 @@
  'seed': 2025,
  'test_interval_ep': 4,
  'test_interval_iter': 200,
- 'weight_his': 0.8,
+ 'weight_his': 0.6,
  'workers': 4}
 [00:34:05.738] 28 iterations per epoch
 [00:34:07.637] iteration:1  t-loss:2.5507, loss-lb:2.5507, loss-ulb:0.0000, weight:0.01, lr:0.0010
@@ -15429,4 +15429,4 @@
 [06:45:11.805] iteration 15000 : dice_score: 0.823874 best_dice: 0.841600
 [06:45:11.805]  <<Test>> - Ep:535  - Dice-S/T:83.37/82.39, Best-S:84.41, Best-T:84.16
 [06:45:11.805]           - AvgLoss(lb/ulb/all):0.15/0.05/0.25
-[06:45:11.859] save model to ./results/Pancreas/Pancrease_base/vstru2_6_labeled/vnet_hsseg/last.pth
+[06:45:11.859] save model to ./results/Pancreas/Pancrease_base/vstru_6_labeled/vnet_hsseg/last.pth
