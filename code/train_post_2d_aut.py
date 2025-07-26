@@ -202,15 +202,9 @@ def train(args, snapshot_path):
             elif loss_type == "ce":
                 loss += ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
             else:
-                loss += (
-                    1
-                    / 2
-                    * (
-                        ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
-                        + dice_loss_ignore(
-                            torch.softmax(seg_u, dim=1), pred, ignore=mask
-                        )
-                    )
+                loss += 0.5 * (
+                    ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+                    + dice_loss_ignore(torch.softmax(seg_u, dim=1), pred, ignore=mask)
                 )
         return loss
 
@@ -230,16 +224,10 @@ def train(args, snapshot_path):
                     torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
                 )
             else:
-                loss += (
-                    1
-                    / 2
-                    * (
-                        ce_loss_tmp(
-                            torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
-                        )
-                        + dice_loss_ignore(
-                            torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
-                        )
+                loss += 0.5 * (
+                    ce_loss_tmp(torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask)
+                    + dice_loss_ignore(
+                        torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
                     )
                 )
         return loss
