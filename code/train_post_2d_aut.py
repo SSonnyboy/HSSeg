@@ -26,6 +26,8 @@ from networks.net_factory import net_factory
 from utils import losses, ramps
 from utils.util import update_values, time_str, AverageMeter
 from val_2D import test_single_volume
+from mainloss import RNKCLoss
+from decay import *
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - #
@@ -79,14 +81,38 @@ def update_ema_variables(model, ema_model, alpha, global_step, args):
         buffer_eval.data = buffer_eval.data * alpha + buffer_train.data * (1 - alpha)
 
 
+def kl_tmp(pred, target, ignore=None):
+    if ignore is not None:
+        pred = pred * (
+            1 - ignore.unsqueeze(1)
+        )  # Mask out regions of interest in prob_u
+        target = target * (
+            1 - ignore.unsqueeze(1)
+        )  # Mask out regions of interest in prob_t
+    kl_loss = F.kl_div(torch.log(pred + 1e-6), target, reduction="batchmean")
+    return kl_loss
+
+
 # Cross-Entropy Loss function
 def ce_loss_tmp(pred, target, ignore=None):
     if ignore is not None:
-        ignore = ignore.unsqueeze(1)
+        ignore = ignore.unsqueeze(1).float()  # Ensure ignore has the right shape
+        pred = pred * (1 - ignore)  # Ignore predictions in the mask region
         target = target * (1 - ignore)  # Ignore the target in the mask region
+
     return F.cross_entropy(
         pred, target.squeeze(1).long()
     )  # Squeeze target if necessary
+
+
+def mse_loss_tmp(pred, target, ignore=None):
+    if ignore is not None:
+        ignore = ignore.unsqueeze(1)
+        pred = pred * (1 - ignore)
+        target = target * (1 - ignore)  # Ignore the target in the mask region
+
+    # MSE Loss calculation
+    return F.mse_loss(pred, target, reduction="mean")  # We use mean reduction for MSE
 
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - #
@@ -97,7 +123,14 @@ def train(args, snapshot_path):
     num_classes = args["num_classes"]
     batch_size = args["batch_size"]
     max_iterations = args["max_iterations"]
-    loss_type = args["loss_type"]
+
+    loss_type = args["loss_type"]  # rnkc
+    hist_weight = args["hist_weight"]  # 0.4
+    gamma = args["gamma"]  # 0.05
+    train_mode = args["train_mode"]  # 1-6
+    stage_k = args["stage_k"]  # 1-3
+    threshold = args["threshold"]
+
     cur_time = time_str()
     writer = SummaryWriter(snapshot_path + "/log")
     csv_train = os.path.join(
@@ -165,6 +198,7 @@ def train(args, snapshot_path):
     )
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1)
+
     logging.info("{} iterations per epoch".format(len(trainloader)))
 
     # + + + + + + + + + + + #
@@ -179,57 +213,85 @@ def train(args, snapshot_path):
     ce_loss = nn.CrossEntropyLoss()
     dice_loss = losses.DiceLoss(num_classes)
     dice_loss_ignore = losses.DiceLossNew(num_classes)
+    rnkcloss = RNKCLoss(gamma_base=gamma)
 
     def compute_label_loss(segs, target_lb):
         target_lb_long = target_lb.long()
         target_lb_float = target_lb.unsqueeze(1).float()
         loss = 0.0
-        for seg in segs:
+        weights = linear_decay_weights(len(segs))
+        for seg, alpha in zip(segs, weights):
             ce = ce_loss(seg, target_lb_long)
             dice = dice_loss(torch.softmax(seg, dim=1), target_lb_float)
-            loss += (ce + dice) / 2.0
+            loss += alpha * ((ce + dice) / 2.0)
         return loss
 
-    def compute_ulb_his_loss(segs_u, his_segs_u, threshold=0.95, loss_type="dice"):
+    def compute_ulb_main_loss(seg_u, seg_t, threshold=0.95, loss_type="rnkc"):
+        prob = torch.softmax(seg_t, dim=1)
+        pred = torch.argmax(prob, dim=1).unsqueeze(1).float()
+        mask = (torch.max(prob.detach(), dim=1)[0] < threshold).float()
+        loss = dice_loss_ignore(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+        if loss_type == "rnkc":
+            loss += rnkcloss(seg_u, seg_t, mask)
+        elif loss_type == "mse":
+            loss += mse_loss_tmp(torch.softmax(seg_u, dim=1), prob, ignore=mask)
+        elif loss_type == "ce":
+            loss += ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+        elif loss_type == "kl":
+            loss += kl_tmp(torch.softmax(seg_u, dim=1), prob, ignore=mask)
+        else:
+            loss += loss
+        return loss / 2.0
+
+    def compute_ulb_his_loss(segs_u, his_segs_u, threshold=0.95, loss_type="rnkc"):
         loss = 0.0
-        for seg_u, his_u in zip(segs_u, his_segs_u):
+        weights = linear_decay_weights(len(segs_u))
+        for seg_u, his_u, alpha in zip(segs_u, his_segs_u, weights):
             prob = torch.softmax(his_u, dim=1)
             pred = torch.argmax(prob, dim=1).unsqueeze(1).float()
             mask = (torch.max(prob.detach(), dim=1)[0] < threshold).float()
             # print(torch.softmax(seg_u, dim=1).shape, pred.shape, mask.shape)
-            if loss_type == "dice":
-                loss += dice_loss_ignore(torch.softmax(seg_u, dim=1), pred, ignore=mask)
-            elif loss_type == "ce":
-                loss += ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
-            else:
-                loss += 0.5 * (
-                    ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
-                    + dice_loss_ignore(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+            loss_item = dice_loss_ignore(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+            if loss_type == "rnkc":
+                loss_item += rnkcloss(seg_u, his_u, mask)
+            elif loss_type == "mse":
+                loss_item += mse_loss_tmp(
+                    torch.softmax(seg_u, dim=1), prob, ignore=mask
                 )
+            elif loss_type == "ce":
+                loss_item += ce_loss_tmp(torch.softmax(seg_u, dim=1), pred, ignore=mask)
+            elif loss_type == "kl":
+                loss += kl_tmp(torch.softmax(seg_u, dim=1), prob, ignore=mask)
+            else:
+                loss_item += loss_item
+            loss += alpha * (loss_item / 2.0)
         return loss
 
-    def compute_ulb_stru_loss(segs_u, ref_seg_u, threshold=0.95):
+    def compute_ulb_stru_loss(segs_u, ref_seg_u, threshold=0.95, loss_type="rnkc"):
         ref_prob = torch.softmax(ref_seg_u, dim=1).detach()
         ref_pred = torch.argmax(ref_prob, dim=1).unsqueeze(1).float()
         ref_mask = (torch.max(ref_prob, dim=1)[0] < threshold).float()
-
+        weights = linear_decay_weights(len(segs_u))
         loss = 0.0
-        for seg_u in segs_u:
-            if loss_type == "dice":
-                loss += dice_loss_ignore(
-                    torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
+        for seg_u, alpha in zip(segs_u, weights):
+            loss_item = dice_loss_ignore(
+                torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
+            )
+            if loss_type == "rnkc":
+                loss_item += rnkcloss(seg_u, ref_seg_u, ref_mask)
+            elif loss_type == "mse":
+                loss_item += mse_loss_tmp(
+                    torch.softmax(seg_u, dim=1), ref_prob, ignore=ref_mask
                 )
             elif loss_type == "ce":
-                loss += ce_loss_tmp(
+                loss_item += ce_loss_tmp(
                     torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
                 )
+            elif loss_type == "kl":
+                loss += kl_tmp(torch.softmax(seg_u, dim=1), ref_prob, ignore=ref_mask)
             else:
-                loss += 0.5 * (
-                    ce_loss_tmp(torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask)
-                    + dice_loss_ignore(
-                        torch.softmax(seg_u, dim=1), ref_pred, ignore=ref_mask
-                    )
-                )
+                loss_item += loss_item
+            loss += alpha * (loss_item / 2.0)
         return loss
 
     # + + + + + + + + + + + #
@@ -270,50 +332,125 @@ def train(args, snapshot_path):
             )
             img_ulb_w, img_ulb_s = weak_batch[:num_ulb], strong_batch[:num_ulb]
 
-            # for label
-            seg0, seg1, seg2, seg3 = model(img_lb_w, mode="train", is_aug=True)
             # cutmix aug
-            cm_flag = random.random() < 0.2
+            if random.random() < args["cm_rate"]:  # for img_lb_w
+                img_lb_w, target_lb = cut_mix(img_lb_w, target_lb)
+            # for label
+            seg0, seg1, seg2, seg3 = model(img_lb_w, mode="train")
+            cm_flag = random.random() < args["cm_rate"]
             if cm_flag:
                 del img_ulb_s
                 cm_mask = generate_mask(img_ulb_w)  # HW
                 img_ulb_s = cut_mix_single(img_ulb_w, cm_mask)
             # for unlabel
-            seg0_u, seg1_u, seg2_u, seg3_u = model(img_ulb_s, mode="train", is_aug=True)
+            seg0_u, seg1_u, seg2_u, seg3_u = model(img_ulb_s, mode="train")
             with torch.no_grad():
-                seg0_his_u, seg1_his_u, seg2_his_u, seg3_his_u = ema_model(
-                    img_ulb_w, mode="train"
-                )
+                if train_mode in (1, 2):
+                    seg0_his_u, seg1_his_u, seg2_his_u, seg3_his_u = model(
+                        img_ulb_w, mode="train"
+                    )
+                else:
+                    if train_mode in (4, 5, 6):
+                        seg0_stru_u = model(img_ulb_w, mode="eval")
+                    seg0_his_u, seg1_his_u, seg2_his_u, seg3_his_u = ema_model(
+                        img_ulb_w, mode="train"
+                    )
 
             if cm_flag:
+                if train_mode in (4, 5, 6):
+                    seg0_stru_u = cut_mix_single(seg0_stru_u, cm_mask)
                 seg3_his_u = cut_mix_single(seg3_his_u, cm_mask)
                 seg2_his_u = cut_mix_single(seg2_his_u, cm_mask)
                 seg1_his_u = cut_mix_single(seg1_his_u, cm_mask)
                 seg0_his_u = cut_mix_single(seg0_his_u, cm_mask)
 
             segs = [seg0, seg1, seg2, seg3]
-            # segs = [seg0]
-            loss_lb = compute_label_loss(segs, target_lb)
-
             segs_u = [seg0_u, seg1_u, seg2_u, seg3_u]
             his_segs_u = [seg0_his_u, seg1_his_u, seg2_his_u, seg3_his_u]
-            # segs_u = [seg0_u]
-            # his_segs_u = [seg0_his_u]
-            loss_ulb_his = compute_ulb_his_loss(segs_u, his_segs_u)
 
-            # print(seg0_u.shape)
-            loss_ulb_stru = compute_ulb_stru_loss(
-                [seg1_u, seg2_u, seg3_u], seg0_u.detach()
-            )
-            # loss_ulb_stru = compute_ulb_stru_loss([seg1_u, seg2_u], seg0_u.detach())
-            # print(loss_lb.shape, loss_ulb_stru.shape, loss_ulb_his.shape)
+            # only test in mode 6
+            if stage_k == 1:
+                segs = segs[:1]
+                segs_u = segs_u[:1]
+                his_segs_u = his_segs_u[:1]
+            elif stage_k == 2:
+                segs = segs[:2]
+                segs_u = segs_u[:2]
+                his_segs_u = his_segs_u[:2]
+            elif stage_k == 3:
+                segs = segs[:3]
+                segs_u = segs_u[:3]
+                his_segs_u = his_segs_u[:3]
+            elif stage_k == 4:
+                segs = segs[:]
+                segs_u = segs_u[:]
+                his_segs_u = his_segs_u[:]
+
+            if train_mode == 1:
+                segs = [seg0]
+                # when test Deeply Supervised UNet use mode 1 and do not use this
+                loss_type = "none"
+            elif train_mode == 2:
+                segs = [seg0]
+                loss_type = "rnkc"
+            elif train_mode in (3, 4, 5):
+                loss_type = "none"
+            elif train_mode == 6:
+                loss_type = "rnkc"
+
+            loss_lb = compute_label_loss(segs, target_lb)
+
             # 6) unsupervised loss
             if iter_num < 1000:
                 loss_ulb = torch.tensor(0.0)
             else:
-                weight_his = args["weight_his"]  # 1 0.8 0.6 0.4 0.2 0.0
-                loss_ulb = weight_his * loss_ulb_his + (1 - weight_his) * loss_ulb_stru
-                # loss_ulb = loss_ulb_his
+                if train_mode == 1:
+                    loss_ulb = compute_ulb_main_loss(
+                        seg0_u, seg0_his_u, loss_type=loss_type, threshold=threshold
+                    )
+                elif train_mode == 2:
+                    loss_ulb = compute_ulb_main_loss(
+                        seg0_u, seg0_his_u, loss_type=loss_type, threshold=threshold
+                    )
+                elif train_mode == 3:
+                    loss_ulb = compute_ulb_his_loss(
+                        segs_u, his_segs_u, loss_type=loss_type, threshold=threshold
+                    )
+                elif train_mode == 4:
+                    loss_ulb = compute_ulb_stru_loss(
+                        segs_u,
+                        seg0_stru_u.detach(),
+                        loss_type=loss_type,
+                        threshold=threshold,
+                    )
+                elif train_mode == 5:
+                    loss_ulb_his = compute_ulb_his_loss(
+                        segs_u, his_segs_u, loss_type=loss_type, threshold=threshold
+                    )
+
+                    loss_ulb_stru = compute_ulb_stru_loss(
+                        segs_u,
+                        seg0_stru_u.detach(),
+                        loss_type=loss_type,
+                        threshold=threshold,
+                    )
+                    loss_ulb = (
+                        hist_weight * (loss_ulb_his) + (1 - hist_weight) * loss_ulb_stru
+                    )
+                elif train_mode == 6:
+                    loss_ulb_his = compute_ulb_his_loss(
+                        segs_u, his_segs_u, loss_type=loss_type, threshold=threshold
+                    )
+
+                    loss_ulb_stru = compute_ulb_stru_loss(
+                        segs_u,
+                        seg0_stru_u.detach(),
+                        loss_type=loss_type,
+                        threshold=threshold,
+                    )
+                    loss_ulb = (
+                        hist_weight * (loss_ulb_his) + (1 - hist_weight) * loss_ulb_stru
+                    )
 
             # 7) total loss
             consistency_weight = get_current_consistency_weight(iter_num // 150, args)
@@ -551,7 +688,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp", type=str, default="ACDC/POST-NoT", help="experiment_name"
     )
-    parser.add_argument("--loss_type", type=str, default="Dice")
     parser.add_argument("--model", type=str, default="unet_hsseg", help="model_name")
     parser.add_argument(
         "--num_classes", type=int, default=4, help="output channel of network"
@@ -569,11 +705,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--base_lr", type=float, default=0.01, help="segmentation network learning rate"
-    )
-    parser.add_argument(
-        "--weight_his",
-        type=float,
-        default=0.8,
     )
     parser.add_argument(
         "--patch_size",
@@ -606,17 +737,39 @@ if __name__ == "__main__":
 
     # model related
     parser.add_argument("--ema_decay", type=float, default=0.99, help="ema_decay")
-    parser.add_argument(
-        "--flag_pseudo_from_student",
-        default=False,
-        action="store_true",
-        help="using pseudo from student itself",
-    )
 
     # unlabeled loss
     parser.add_argument("--consistency", type=float, default=1.0, help="consistency")
     parser.add_argument(
         "--consistency_rampup", type=float, default=150.0, help="consistency_rampup"
+    )
+    parser.add_argument("--cm_rate", type=float, default=0.2)
+    # ex
+    parser.add_argument("--loss_type", type=str, default="rnkc")
+    parser.add_argument(
+        "--hist_weight",
+        type=float,
+        default=0.4,
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--train_mode",
+        type=int,
+        default=6,
+    )
+    parser.add_argument(
+        "--stage_k",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.95,
     )
 
     # parse args
@@ -653,14 +806,22 @@ if __name__ == "__main__":
         cudnn.benchmark = True
         cudnn.deterministic = False
     else:
-        cudnn.benchmark = False
-        cudnn.deterministic = True
-    if args["seed"] > 0:
         random.seed(args["seed"])
         np.random.seed(args["seed"])
         torch.manual_seed(args["seed"])
         torch.cuda.manual_seed(args["seed"])
+        torch.cuda.manual_seed_all(args["seed"])
+        # torch.backends.cudnn.benchmark = False
+        # torch.backends.cudnn.deterministic = True
+        # torch.use_deterministic_algorithms(True)
+        cudnn.benchmark = False
+        cudnn.deterministic = True
 
+    # if args["seed"] > 0:
+    #     random.seed(args["seed"])
+    #     np.random.seed(args["seed"])
+    #     torch.manual_seed(args["seed"])
+    #     torch.cuda.manual_seed(args["seed"])
     # 4. outputs and logger
     snapshot_path = "{}/{}_{}_labeled/{}".format(
         args["res_path"], args["exp"], args["labeled_num"], args["model"]

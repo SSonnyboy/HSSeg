@@ -2,7 +2,7 @@
 root_path: "/home/chenyu/SSMIS/data/LA"
 res_path: "./results/LA"
 # random seed
-seed: 2025
+seed: 2027
 test_interval_ep: 4
 
 

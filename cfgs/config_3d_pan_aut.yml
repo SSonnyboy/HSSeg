@@ -2,7 +2,7 @@
 root_path: "/home/chenyu/SSMIS/data/Pancreas"
 res_path: "./results/Pancreas"
 # random seed
-seed: 2025
+seed: 1377
 test_interval_ep: 4
 
 

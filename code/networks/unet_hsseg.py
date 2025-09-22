@@ -141,17 +141,17 @@ class Decoder(nn.Module):
         x2 = feature[2]
         x3 = feature[3]
         x4 = feature[4]
-        x = self.up1(x4, x3)
-        dp3_out_seg = self.auxhead3(x, shape)
+        x5 = self.up1(x4, x3)
+        dp3_out_seg = self.auxhead3(x5, shape)
 
-        x = self.up2(x, x2)
-        dp2_out_seg = self.auxhead2(x, shape)
+        x6 = self.up2(x5, x2)
+        dp2_out_seg = self.auxhead2(x6, shape)
 
-        x = self.up3(x, x1)
-        dp1_out_seg = self.auxhead1(x, shape)
+        x7 = self.up3(x6, x1)
+        dp1_out_seg = self.auxhead1(x7, shape)
 
-        x = self.up4(x, x0)
-        dp0_out_seg = self.out_conv(x)
+        x8 = self.up4(x7, x0)
+        dp0_out_seg = self.out_conv(x8)
         return dp0_out_seg, dp1_out_seg, dp2_out_seg, dp3_out_seg
 
 
@@ -169,16 +169,10 @@ class UNet_HSSEG(nn.Module):
         }
         self.encoder = Encoder(params)
         self.decoder = Decoder(params)
-        self.dropout = nn.Dropout2d(p=0.2)
 
     def forward(self, x, mode="eval", is_aug=False):
         shape = x.shape[2:]
         feature = self.encoder(x)
-        # [torch.Size([2, 16, 256, 256]), torch.Size([2, 32, 128, 128]),
-        # torch.Size([2, 64, 64, 64]), torch.Size([2, 128, 32, 32]),
-        # torch.Size([2, 256, 16, 16])]
-        # if mode == "train" and is_aug:
-        #     feature = [self.dropout(x) for x in feature]
         dp0_out_seg, dp1_out_seg, dp2_out_seg, dp3_out_seg = self.decoder(
             feature, shape
         )

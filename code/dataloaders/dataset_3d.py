@@ -22,7 +22,7 @@ class Pancreas(Dataset):
         self.sample_list = []
 
         train_path = self._base_dir + "/train.list"
-        test_path = self._base_dir + "/eval.list"
+        test_path = self._base_dir + "/test.list"
 
         if split == "train":
             with open(train_path, "r") as f:
